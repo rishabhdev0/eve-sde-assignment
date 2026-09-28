@@ -1,0 +1,48 @@
+from logging.config import fileConfig
+from sqlalchemy import engine_from_config, pool
+from alembic import context
+import sys, os
+
+sys.path.append(os.getcwd())
+
+from app.core.config import settings
+from app.db.base import Base
+from app.models.user import User  # noqa - import all models here as they're added
+from app.models.centre import DiagnosticCentre  # noqa
+from app.models.test import Test  # noqa
+from app.models.centre_test import CentreTest  # noqa
+from app.models.slot import Slot  # noqa
+from app.models.booking import Booking  # noqa
+from app.models.booking_event import BookingEvent  # noqa
+from app.models.payment import Payment  # noqa
+from app.models.payment_event import PaymentEvent  # noqa
+from app.models.webhook_event import WebhookEvent  # noqa
+
+config = context.config
+config.set_main_option("sqlalchemy.url", settings.DATABASE_URL)
+
+if config.config_file_name is not None:
+    fileConfig(config.config_file_name)
+
+target_metadata = Base.metadata
+
+
+def run_migrations_offline():
+    url = config.get_main_option("sqlalchemy.url")
+    context.configure(url=url, target_metadata=target_metadata, literal_binds=True)
+    with context.begin_transaction():
+        context.run_migrations()
+
+
+def run_migrations_online():
+    connectable = engine_from_config(config.get_section(config.config_ini_section), prefix="sqlalchemy.", poolclass=pool.NullPool)
+    with connectable.connect() as connection:
+        context.configure(connection=connection, target_metadata=target_metadata)
+        with context.begin_transaction():
+            context.run_migrations()
+
+
+if context.is_offline_mode():
+    run_migrations_offline()
+else:
+    run_migrations_online()
