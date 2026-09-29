@@ -1,7 +1,5 @@
-# Import every model here so anywhere Base.metadata is used, all tables are registered together.
-# This matters because SQLAlchemy resolves foreign keys by table name lookup in Base.metadata -
-# if a model class is never imported, its table silently doesn't exist for FK resolution,
-# even though the class file is right there on disk.
+# Import every model so its table actually gets registered - miss one and its
+# foreign keys just quietly don't work, even though the file's right there.
 from app.models.user import User  # noqa
 from app.models.centre import DiagnosticCentre  # noqa
 from app.models.test import Test  # noqa

@@ -90,11 +90,8 @@ class AuthService:
 
         if not is_refresh_jti_valid(user_id, jti):
             if was_refresh_jti_used(user_id, jti):
-                # This exact token was already rotated out once before - a legitimate
-                # client would never present it again, since it received a brand new
-                # refresh token at that time. Seeing it again means it was copied/stolen
-                # and both the attacker and the real user are now racing on old tokens.
-                # Nuke every active session for this user as a precaution.
+                # This token was already used once - if it shows up again, it was
+                # copied. Kill every session for this user to be safe.
                 revoke_all_refresh_tokens(user_id)
                 raise RefreshTokenReuseDetectedError()
             raise InvalidTokenError("Invalid or expired refresh token")

@@ -13,22 +13,12 @@ STUCK_THRESHOLD_MINUTES = 10
 
 @celery_app.task
 def reconcile_stuck_payments():
-    """
-    Finds payments stuck in PENDING past a reasonable window - meaning the async
-    worker never got to them, or crashed mid-task without retrying successfully.
-
-    Real-world note: a production system would query the actual payment provider's
-    API here to find out the true status before deciding anything (the payment may
-    have genuinely succeeded on their end even if our webhook never arrived). Since
-    this assignment simulates the provider with no real external state to check,
-    the safest fallback is to mark it FAILED rather than leave it stuck forever -
-    a failed booking can be retried by the user; a booking silently stuck in limbo
-    cannot.
-
-    Routes through the same WebhookService.handle_event() path as every other
-    state change, so the existing idempotency/locking guarantees still apply here -
-    this is a fallback trigger, not a separate way to mutate state.
-    """
+    # Catches payments stuck in PENDING too long - worker never picked it up,
+    # or crashed before finishing. A real system would check the provider's API
+    # first, but there's no real provider here, so we just fail it - better than
+    # leaving it stuck forever, and the user can retry.
+    # Goes through the normal webhook handler so it gets the same locking and
+    # dedup guarantees as everything else, not some separate shortcut.
     db = SessionLocal()
     try:
         cutoff = datetime.now(timezone.utc) - timedelta(minutes=STUCK_THRESHOLD_MINUTES)

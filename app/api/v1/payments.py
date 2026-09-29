@@ -10,7 +10,7 @@ router = APIRouter(prefix="/payments", tags=["payments"])
 
 @router.post("/", response_model=PaymentOut, status_code=status.HTTP_202_ACCEPTED)
 def create_payment(payload: PaymentCreate, db: Session = Depends(get_db), user=Depends(get_current_user)):
-    # 202 Accepted, not 201 - the payment is PENDING and processed asynchronously by the Celery worker
+    # 202, not 201 - the payment is still PENDING, worker picks it up async
     return PaymentService(db).create_payment(str(user.id), str(payload.booking_id))
 
 

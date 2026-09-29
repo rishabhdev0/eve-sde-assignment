@@ -5,7 +5,7 @@ from app.db.base import Base
 
 
 class WebhookEvent(Base):
-    """Dedup log only - has this event_id been processed before. Nothing else."""
+    # Dedup log only - has this event_id been seen before, nothing else.
     __tablename__ = "webhook_events"
 
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)

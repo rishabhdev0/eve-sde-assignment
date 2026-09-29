@@ -3,7 +3,7 @@
 # 🏥 CareFlow
 ### EVE Healthcare · Diagnostic Booking & Payments API
 
-**Book a test. Pay for it. Stay correct under retries, races and partial failures.**
+**Book a test. Pay for it. Don't break anything when requests retry, replay, or race each other.**
 
 ![Python](https://img.shields.io/badge/Python-3.12-3776AB?logo=python&logoColor=white)
 ![FastAPI](https://img.shields.io/badge/FastAPI-0.115-009688?logo=fastapi&logoColor=white)
@@ -11,7 +11,7 @@
 ![Redis](https://img.shields.io/badge/Redis-7-DC382D?logo=redis&logoColor=white)
 ![Celery](https://img.shields.io/badge/Celery-5.4-37814A?logo=celery&logoColor=white)
 ![Docker](https://img.shields.io/badge/Docker-Compose-2496ED?logo=docker&logoColor=white)
-![Tests](https://img.shields.io/badge/tests-57%20passing-brightgreen)
+![Tests](https://img.shields.io/badge/tests-60%20passing-brightgreen)
 
 [✨ Highlights](#-highlights) · [🚀 Quick Start](#-quick-start) · [📡 API](#-api-reference) · [🔄 Flow](#-booking--payment-flow) · [🗄️ Database](#️-database-design) · [🛡️ Security](#️-security) · [🧭 Assumptions](#-assumptions) · [🔮 Improvements](#-what-id-improve-next)
 
@@ -19,21 +19,21 @@
 
 ---
 
-> 💡 **The idea:** no double bookings, no double-processed payments, and no booking that disagrees with its payment, even when requests are retried, replayed or race each other.
+> 💡 **The goal here:** no double bookings, no payment processed twice, and no booking that ends up disagreeing with its own payment — even if a request gets retried, a webhook fires twice, or two people hit the same slot at the same second.
 
 ## ✨ Highlights
 
-| | Quality | How it is achieved |
+| | Quality | How |
 |---|---|---|
-| 💰 | **Money-safe webhooks** | Three idempotency layers: Redis fast path, unique `event_id` in Postgres, and a "payment must still be `PENDING`" guard |
-| 🔒 | **Race-safe** | `SELECT ... FOR UPDATE` on slots, bookings and payments; the duplicate-booking check runs *inside* the slot lock |
-| 🧭 | **One state machine** | Every booking change goes through a single `transition()` that validates the move, writes an audit event and releases the seat |
-| ♻️ | **Self-healing** | Celery Beat fails payments whose result never arrived and cancels abandoned bookings |
-| 💸 | **Auto-refund** | Money captured for an already-cancelled booking is refunded immediately and logged |
-| 🛡️ | **Secure by default** | bcrypt, short-lived JWTs, refresh rotation with **theft detection**, sliding-window rate limits, no user enumeration |
-| 🔍 | **Observable** | JSON logs with per-request ID (`X-Request-ID`), catch-all error handler, `/health` that probes Postgres and Redis |
-| ✅ | **Tested** | 57 unit and integration tests on an isolated database |
-| 📦 | **Reproducible** | One `docker compose up`, versioned Alembic migrations, idempotent seed script |
+| 💰 | **Webhooks can't double-charge** | Three layers of protection: a Redis check, a unique `event_id` in Postgres, and a rule that the payment must still be `PENDING` before anything changes |
+| 🔒 | **No race conditions** | Slots, bookings and payments all get row-locked (`SELECT ... FOR UPDATE`) before anything touches them; the duplicate-booking check happens *inside* that lock, not before it |
+| 🧭 | **One place owns booking state** | Every status change goes through a single `transition()` function — it checks the move is legal, logs it, and frees the seat if needed. No second path to drift out of sync |
+| ♻️ | **Fixes itself** | Celery Beat sweeps up payments that never got a result and cancels bookings nobody paid for |
+| 💸 | **Refunds happen automatically** | If money gets captured for a booking that was already cancelled, it's refunded right away and logged |
+| 🛡️ | **Secure out of the box** | bcrypt, short-lived JWTs, refresh token rotation with theft detection, rate limits, no way to enumerate accounts |
+| 🔍 | **You can actually debug it** | JSON logs with a request ID on everything, a catch-all error handler, and a `/health` endpoint that really checks Postgres and Redis |
+| ✅ | **Tested** | 60 unit and integration tests, all against an isolated database |
+| 📦 | **One command to run it** | `docker compose up`, Alembic handles migrations, seed script is safe to rerun |
 
 ## 📋 Requirements Coverage
 
@@ -51,12 +51,12 @@
 | Bonus: Celery / background jobs | ✅ | Payments, reconciliation, cleanup |
 | Bonus: Docker and docker-compose | ✅ | 5 services |
 | Bonus: Swagger / OpenAPI | ✅ | `/docs`, `/redoc` |
-| Bonus: Unit / integration tests | ✅ | 57 tests |
+| Bonus: Unit / integration tests | ✅ | 60 tests |
 | Bonus: Structured logging | ✅ | JSON logs with request IDs |
 | Bonus: Pagination | ✅ | `skip` and `limit` on list endpoints |
 | Bonus: Rate limiting | ✅ | Sliding window on login and signup |
 | Bonus: Webhook retry handling | ✅ | Celery retries (3x) plus idempotent handler |
-| Bonus: Redis | ✅  Partial | Rate limiting, idempotency, token state. Catalog caching not implemented |
+| Bonus: Redis | 🟡 Partial | Rate limiting, idempotency, token state. Catalog caching not implemented |
 
 </details>
 
@@ -104,45 +104,46 @@ flowchart LR
 | 🗄️ `postgres` | System of record (`eve_db`, user `eve`) | `5432` |
 | ⚡ `redis` | Broker, rate limits, dedup, token state | `6379` |
 
-**Layering rule:** routers parse HTTP, services own business rules and transactions, repositories own queries and locks. Services never touch the request object and routers never touch SQLAlchemy, so business logic is unit-testable without HTTP.
+**How the layers split up:** routers just parse HTTP, services own the business rules and transactions, repositories own the queries and locks. Services never touch the request object and routers never touch SQLAlchemy directly — so the business logic can be tested without spinning up HTTP at all.
 
 ## 🚀 Quick Start
 
-**Prerequisite:** Docker (Desktop, or Engine with Compose v2). Nothing else.
+**You need:** Docker (Desktop, or Engine with Compose v2). Nothing else.
 
 ```bash
-git clone <your-repo-url> && cd CareFlow
+git clone https://github.com/rishabhdev0/eve-sde-assignment.git CareFlow
+cd CareFlow
 
 cp .env.example .env            # PowerShell: copy .env.example .env
 # Set JWT_SECRET, SESSION_SECRET and WEBHOOK_SHARED_SECRET to three different long random strings
 
 docker compose up --build -d
-docker compose exec api alembic upgrade head           # create the schema
+docker compose exec api alembic upgrade head           # creates the schema
 docker compose exec api python -m scripts.seed_data    # optional sample data
 ```
 
-The seed script creates 3 centres, 4 tests, 8 offerings and 96 future slots, and is safe to run repeatedly.
+The seed script drops in 3 centres, 4 tests, 8 offerings, and 96 future slots. Safe to run more than once.
 
 | 🔗 | URL |
 |---|---|
-| 📖 Swagger UI | http://localhost:8000/docs (click **Authorize**, paste the access token without `Bearer `) |
+| 📖 Swagger UI | http://localhost:8000/docs (hit **Authorize**, paste the access token, skip the `Bearer ` part) |
 | 📘 ReDoc | http://localhost:8000/redoc |
-| ❤️ Health | http://localhost:8000/health (`503` if Postgres or Redis is down) |
+| ❤️ Health | http://localhost:8000/health (returns `503` if Postgres or Redis is down) |
 
-> 📧 **Emails are mocked.** Links are written to the API log:
+> 📧 **Emails are mocked.** The link just gets written to the API log:
 > `docker compose logs api | grep "MOCK EMAIL"`
-> To skip verification while exploring, set `REQUIRE_EMAIL_VERIFICATION=false` in `.env`, then `docker compose up -d --force-recreate`.
+> Want to skip verification entirely while you're poking around? Set `REQUIRE_EMAIL_VERIFICATION=false` in `.env`, then `docker compose up -d --force-recreate`.
 
 ### ⚙️ Configuration
 
-Changes to `.env` need `docker compose up -d --force-recreate` (`restart` does not re-read it).
+Changing `.env`? You need `docker compose up -d --force-recreate` — a plain `restart` won't pick it up.
 
 | Variable | Default | Purpose |
 |---|---|---|
 | `DATABASE_URL` / `REDIS_URL` | compose services | Connections |
 | `JWT_SECRET` | **required** | Signs access, refresh, reset and verification tokens |
 | `SESSION_SECRET` | placeholder | Google OAuth session cookie |
-| `WEBHOOK_SHARED_SECRET` | placeholder | Authenticates webhooks. **Change it** |
+| `WEBHOOK_SHARED_SECRET` | placeholder | Authenticates webhooks — **change this before shipping** |
 | `ACCESS_TOKEN_EXPIRE_MINUTES` | `15` | Access token lifetime |
 | `REFRESH_TOKEN_EXPIRE_DAYS` | `7` | Refresh token lifetime |
 | `RESET_TOKEN_EXPIRE_MINUTES` | `30` | Password reset window |
@@ -154,60 +155,60 @@ Changes to `.env` need `docker compose up -d --force-recreate` (`restart` does n
 
 ## 📡 API Reference
 
-Base path `/api/v1`. 🔓 public · 🔑 JWT · 🔐 webhook secret. Interactive docs at `/docs`.
+Base path `/api/v1`. 🔓 public · 🔑 needs a JWT · 🔐 needs the webhook secret. Full interactive docs at `/docs`.
 
 ### 🔐 Auth
 
-| | Method | Path | Description |
+| | Method | Path | What it does |
 |---|---|---|---|
-| 🔓 | POST | `/auth/signup` | Create account. 5 per hour per IP |
-| 🔓 | POST | `/auth/verify-email` | Confirm email with the emailed token |
-| 🔓 | POST | `/auth/login` | Access and refresh tokens. 5 per 5 min per email and IP |
-| 🔓 | POST | `/auth/refresh` | Rotate the refresh token, returns a new pair |
-| 🔓 | POST | `/auth/forgot-password` | Always `202`, never reveals if the email exists |
-| 🔓 | POST | `/auth/reset-password` | Set a new password. Reset token is single-use |
-| 🔓 | GET | `/auth/google/login` | Start Google sign-in |
-| 🔓 | GET | `/auth/google/callback` | Complete Google sign-in, returns tokens |
+| 🔓 | POST | `/auth/signup` | Creates an account. 5 per hour per IP |
+| 🔓 | POST | `/auth/verify-email` | Confirms the email using the token that was "sent" |
+| 🔓 | POST | `/auth/login` | Returns access + refresh tokens. 5 attempts per 5 min per email/IP |
+| 🔓 | POST | `/auth/refresh` | Swaps a refresh token for a new pair |
+| 🔓 | POST | `/auth/forgot-password` | Always returns `202`, doesn't leak whether the email exists |
+| 🔓 | POST | `/auth/reset-password` | Sets a new password. Reset token only works once |
+| 🔓 | GET | `/auth/google/login` | Kicks off Google sign-in |
+| 🔓 | GET | `/auth/google/callback` | Finishes Google sign-in, returns tokens |
 
 ### 🏢 Catalog
 
-| | Method | Path | Description |
+| | Method | Path | What it does |
 |---|---|---|---|
-| 🔓 | GET | `/centres/` | List centres (`skip`, `limit`) |
-| 🔑 | POST | `/centres/` | Create a centre |
-| 🔓 | GET | `/centres/{centre_id}` | One centre |
-| 🔑 | POST | `/centres/{centre_id}/tests` | Offer a test at a centre with price and turnaround |
-| 🔓 | GET | `/centres/{centre_id}/tests` | Tests a centre offers (each `id` is a `centre_test_id`) |
-| 🔓 | GET | `/tests/` | Test catalog (`skip`, `limit`) |
-| 🔑 | POST | `/tests/` | Add a test to the catalog |
-| 🔑 | POST | `/slots/` | Create a bookable slot (must be in the future) |
-| 🔓 | GET | `/slots/?centre_test_id=` | Slots with free capacity for an offering |
+| 🔓 | GET | `/centres/` | Lists centres (`skip`, `limit`) |
+| 🔑 | POST | `/centres/` | Creates a centre |
+| 🔓 | GET | `/centres/{centre_id}` | Gets one centre |
+| 🔑 | POST | `/centres/{centre_id}/tests` | Adds a test to a centre with its own price and turnaround |
+| 🔓 | GET | `/centres/{centre_id}/tests` | Tests a centre offers (the `id` here is the `centre_test_id`) |
+| 🔓 | GET | `/tests/` | The full test catalog (`skip`, `limit`) |
+| 🔑 | POST | `/tests/` | Adds a test to the catalog |
+| 🔑 | POST | `/slots/` | Creates a bookable slot (has to be in the future) |
+| 🔓 | GET | `/slots/?centre_test_id=` | Slots that still have room |
 
 ### 📅 Bookings & 💳 Payments
 
-| | Method | Path | Description |
+| | Method | Path | What it does |
 |---|---|---|---|
-| 🔑 | POST | `/bookings/` | Book a slot → `PENDING`, holds a seat |
+| 🔑 | POST | `/bookings/` | Books a slot → `PENDING`, holds the seat |
 | 🔑 | GET | `/bookings/` | Your bookings (`skip`, `limit`) |
-| 🔑 | GET | `/bookings/{id}` | One booking (owner only) |
-| 🔑 | POST | `/bookings/{id}/cancel` | Cancel, free the seat, record a refund if it was `CONFIRMED` |
-| 🔑 | POST | `/payments/` | Start a simulated payment → `202 PENDING` |
+| 🔑 | GET | `/bookings/{id}` | One booking (only if you own it) |
+| 🔑 | POST | `/bookings/{id}/cancel` | Cancels, frees the seat, writes a refund if it was `CONFIRMED` |
+| 🔑 | POST | `/payments/` | Kicks off a simulated payment → `202 PENDING` |
 | 🔑 | GET | `/payments/{id}` | Payment status (owner only) |
-| 🔐 | POST | `/payments/webhook/` | Idempotent callback, needs `x-webhook-secret` header |
-| 🔓 | GET | `/health` | Dependency-aware health check |
+| 🔐 | POST | `/payments/webhook/` | Idempotent callback, needs the `x-webhook-secret` header |
+| 🔓 | GET | `/health` | Actually checks the dependencies, not just "yeah I'm up" |
 
 ### ⚠️ Status Codes
 
-| Code | Meaning |
+| Code | Means |
 |---|---|
-| `400` | Rule broken: duplicate booking or payment, not payable, slot expired, invalid transition |
-| `401` | Bad or expired token, bad credentials, bad webhook secret, refresh-token reuse |
-| `403` | Missing `Authorization` header, not the owner, email not verified |
-| `404` | Unknown centre, test, slot, booking or payment |
-| `409` | Slot is full |
-| `422` | Validation: weak password, bad UUID, past slot time, invalid status |
-| `429` | Rate limit hit |
-| `500` | Generic body; traceback logged with the request ID |
+| `400` | Rule broken — duplicate booking or payment, booking not payable, slot expired, illegal transition |
+| `401` | Bad/expired token, wrong credentials, wrong webhook secret, or a reused refresh token |
+| `403` | No `Authorization` header, not the owner, or email not verified |
+| `404` | Centre, test, slot, booking or payment doesn't exist |
+| `409` | Slot's full |
+| `422` | Validation failed — weak password, bad UUID, slot in the past, bad status value |
+| `429` | Hit the rate limit |
+| `500` | Something broke; generic body back, full traceback in the logs tied to the request ID |
 
 ### 🧪 Example Walkthrough
 
@@ -218,7 +219,7 @@ Base path `/api/v1`. 🔓 public · 🔑 JWT · 🔐 webhook secret. Interactive
 BASE=http://localhost:8000/api/v1
 JSON='Content-Type: application/json'
 
-# 1. Sign up, verify (token is in the API log), log in
+# 1. Sign up, verify (grab the token from the log), log in
 curl -s -X POST $BASE/auth/signup -H "$JSON" \
   -d '{"email":"demo@example.com","password":"Str0ng@Pass1"}'
 docker compose logs api | grep "MOCK EMAIL"
@@ -250,7 +251,7 @@ curl -s -X POST $BASE/bookings/ -H "Authorization: Bearer $TOKEN" -H "$JSON" \
 ```
 
 ```bash
-# 4. Pay. Returns 202 immediately; the worker settles it in the background
+# 4. Pay — returns 202 right away, the worker settles it in the background
 curl -s -X POST $BASE/payments/ -H "Authorization: Bearer $TOKEN" -H "$JSON" \
   -d '{"booking_id":"<booking_id>"}'
 # {"id":"...","booking_id":"...","amount":"500.00","status":"PENDING","created_at":"..."}
@@ -259,22 +260,25 @@ curl -s -X POST $BASE/payments/ -H "Authorization: Bearer $TOKEN" -H "$JSON" \
 curl -s $BASE/payments/<payment_id> -H "Authorization: Bearer $TOKEN"
 curl -s $BASE/bookings/<booking_id> -H "Authorization: Bearer $TOKEN"
 
-# 6. Cancel (frees the seat; a CONFIRMED booking also gets a REFUNDED payment row)
+# 6. Cancel (frees the seat; if it was CONFIRMED, you'll also get a REFUNDED payment row)
 curl -s -X POST $BASE/bookings/<booking_id>/cancel -H "Authorization: Bearer $TOKEN"
 ```
 
-**Call the webhook by hand.** The simulator settles payments within a second, so first run `docker compose stop celery-worker`, create a payment, then:
+**Want to hit the webhook yourself?** The simulator usually beats you to it (settles in under a second), so stop the worker first, then create a payment:
 
 ```bash
+docker compose stop celery-worker
+
 curl -s -X POST $BASE/payments/webhook/ -H "$JSON" \
   -H "x-webhook-secret: <WEBHOOK_SHARED_SECRET from .env>" \
   -d '{"event_id":"evt-123","booking_id":"<booking_id>","payment_id":"<payment_id>","status":"SUCCESS","provider_ref":"PSP-1"}'
 # {"status":"processed","event_id":"evt-123","payment_status":"SUCCESS"}
-# Send the exact same request again:
+
+# send it again, same event_id:
 # {"status":"duplicate_ignored","event_id":"evt-123"}
 ```
 
-Restart the worker afterwards: `docker compose start celery-worker`.
+Don't forget to bring the worker back: `docker compose start celery-worker`.
 
 </details>
 
@@ -293,7 +297,7 @@ stateDiagram-v2
     CANCELLED --> [*]
 ```
 
-`FAILED` and `CANCELLED` are terminal and both release the seat. Any transition not drawn above is rejected with `400`.
+`FAILED` and `CANCELLED` are dead ends, and both free the seat. Anything not shown above gets rejected with a `400`.
 
 ### 🧵 End-to-end sequence
 
@@ -308,28 +312,28 @@ sequenceDiagram
 
     U->>A: POST /bookings (slot_id)
     A->>DB: BEGIN, lock slot row
-    A->>DB: duplicate + capacity check, booked_count +1, insert booking PENDING
+    A->>DB: check duplicate + capacity, booked_count +1, insert booking PENDING
     A-->>U: 201 booking PENDING
 
     U->>A: POST /payments (booking_id)
-    A->>DB: BEGIN, lock booking, reject if not PENDING or live payment exists
+    A->>DB: BEGIN, lock booking, reject if not PENDING or already has a live payment
     A->>DB: insert payment PENDING, COMMIT
     A->>R: enqueue process_payment
     A-->>U: 202 payment PENDING
 
     R->>W: deliver task
     W->>W: simulate gateway (85% success / 15% fail)
-    W->>R: pre-check event_id
+    W->>R: check event_id
     W->>DB: insert webhook_events, lock booking + payment
     W->>DB: apply transition, COMMIT
     W->>R: remember event_id for 24h
-    Note over W,DB: same code path as POST /payments/webhook/
+    Note over W,DB: exact same code path as POST /payments/webhook/
 
     U->>A: GET /payments/{id}
     A-->>U: 200 SUCCESS, booking now CONFIRMED
 ```
 
-> 🎯 The simulator feeds its result through the **same service method** the HTTP webhook uses, so simulated and "real" callbacks cannot behave differently.
+> 🎯 The simulator doesn't have its own logic to "confirm" a payment — it just sends its result through the same service method the real webhook uses. So there's only ever one way a payment gets settled, whether it's simulated or real.
 
 ### 🔁 Webhook Idempotency
 
@@ -352,34 +356,34 @@ flowchart TD
     N --> C
 ```
 
-| Layer | Stops |
+| Layer | What it stops |
 |---|---|
-| ⚡ Redis `event_id` key (24h) | Cheap replays. An optimisation, not the source of truth |
-| 🗄️ Unique `webhook_events.event_id` | Replays after the Redis key expires or Redis is flushed |
-| 🚧 "Payment must be `PENDING`" | A *different* event trying to change a settled payment |
-| 🧭 Booking state machine | Illegal booking transitions |
+| ⚡ Redis `event_id` key (24h) | Cheap, fast replays — just an optimization, not the real source of truth |
+| 🗄️ Unique `webhook_events.event_id` | Replays that show up after the Redis key's already expired |
+| 🚧 "Payment must be `PENDING`" | A *different* event trying to touch a payment that's already settled |
+| 🧭 Booking state machine | Any transition that just doesn't make sense |
 
-Redis is written **after** the DB commit, so a failed commit can never leave Redis claiming an event was processed.
+Redis only gets written **after** the DB commit succeeds — so if the commit fails, Redis never falsely claims the event was handled.
 
-> 💸 **The late-success case.** If the user cancels while payment is in flight and the success callback arrives afterwards, the handler does not throw (that would roll back the dedup record and leave the payment `PENDING` forever). It records the payment as `SUCCESS`, immediately writes a linked `REFUNDED` row, and logs a warning. Money is never captured without a record of returning it.
+> 💸 **The late-success problem.** If someone cancels their booking while the payment's still processing, and then the success callback shows up anyway — the code doesn't throw an error. Throwing would roll back the whole transaction, including the record that this event was ever seen, so every retry would hit the exact same wall forever. Instead it marks the payment `SUCCESS`, writes a `REFUNDED` row right next to it, and logs a warning. Money never gets taken without a record of it going back.
 
 ### 🔒 Concurrency Control
 
-| Operation | Lock taken | Prevents |
+| Operation | What gets locked | What it stops |
 |---|---|---|
-| Create booking | `slots` row | Overselling; the duplicate check runs inside this lock |
+| Create booking | `slots` row | Overselling a slot; the duplicate check happens inside this same lock |
 | Cancel booking | `bookings` then `slots` row | Cancel racing a payment result |
-| Create payment | `bookings` row | Paying for a booking being cancelled; duplicate live payments |
-| Process webhook | `bookings` and `payments` rows | A duplicate or late event racing a real one |
-| Abandoned-booking cleanup | `bookings` row | Cancelling a booking that just got a payment |
+| Create payment | `bookings` row | Paying for a booking that's mid-cancel; two live payments on one booking |
+| Process webhook | `bookings` and `payments` rows | A duplicate or late event stepping on a real one |
+| Abandoned-booking cleanup | `bookings` row | Cancelling a booking that just got paid for |
 
 ### ⏰ Background Jobs
 
-| Task | Schedule | Behaviour |
+| Task | Runs | Does |
 |---|---|---|
-| `process_payment_async` | On payment creation | Simulates the gateway (85% `SUCCESS`, 15% `FAILED`). 3 retries, 5s apart; safe because the handler is idempotent |
-| `reconcile_stuck_payments` | Every 5 min | Payments `PENDING` for over 10 min are failed through the webhook path |
-| `expire_abandoned_bookings` | Every 5 min | `PENDING` bookings older than 15 min with no live payment are cancelled and the seat freed |
+| `process_payment_async` | Right after a payment's created | Simulates the gateway (85% success, 15% fail). Retries up to 3 times, 5s apart — safe because the handler is idempotent anyway |
+| `reconcile_stuck_payments` | Every 5 min | Anything still `PENDING` after 10 min gets failed through the normal webhook path |
+| `expire_abandoned_bookings` | Every 5 min | `PENDING` bookings older than 15 min with no live payment get cancelled, seat freed |
 
 ## 🗄️ Database Design
 
@@ -475,43 +479,43 @@ erDiagram
 
 ### 🧠 Design Decisions
 
-| Decision | Reasoning |
+| Decision | Why |
 |---|---|
-| **`tests` separate from `centre_tests`** | The same test ("CBC") exists at many centres with different prices. `UNIQUE (centre_id, test_id)` stops duplicate listings |
-| **`slots` carry `capacity` and `booked_count`** | The double-booking guard, checked and incremented under a row lock. `UNIQUE (centre_test_id, start_time)` prevents duplicate slots |
-| **`bookings.amount` is a snapshot** | A later price change must not alter what a customer already agreed to pay |
-| **Three event tables** | `webhook_events` = "seen this event?", `payment_events` = "what happened to this payment?", `booking_events` = "who changed this booking's state?" |
-| **Refunds are new rows** | The original `SUCCESS` payment is never overwritten; a `REFUNDED` row points back via `refunded_payment_id` |
-| **UUID keys, enum statuses** | Not guessable or enumerable; invalid states can't be stored |
-| **`Numeric(10, 2)` for money** | No floating-point rounding errors |
-| **Indexes** | `users.email`, `tests.name`, `bookings.user_id`, `bookings.slot_id`, `payments.booking_id`, `webhook_events.event_id`, event-table foreign keys |
+| **`tests` is a separate table from `centre_tests`** | Same test ("CBC") shows up at multiple centres with different prices, so this avoids duplicating the test itself. `UNIQUE (centre_id, test_id)` stops a centre listing the same test twice |
+| **`slots` track `capacity` and `booked_count`** | That's the actual double-booking guard — checked and bumped under a row lock. `UNIQUE (centre_test_id, start_time)` also blocks duplicate slots |
+| **`bookings.amount` is a snapshot** | If the centre changes its price later, it shouldn't retroactively change what someone already agreed to pay |
+| **Three separate event tables** | Each one answers a different question — `webhook_events` = "have I seen this before?", `payment_events` = "what happened to this payment?", `booking_events` = "who changed this booking and to what?" |
+| **Refunds are new rows, not edits** | The original `SUCCESS` payment never gets touched. A `REFUNDED` row points back to it with `refunded_payment_id`, so the history stays honest |
+| **UUID keys, enum statuses** | Can't be guessed or enumerated, and invalid states just can't exist in the column |
+| **`Numeric(10, 2)` for money** | No floating-point rounding weirdness |
+| **Indexes** | `users.email`, `tests.name`, `bookings.user_id`, `bookings.slot_id`, `payments.booking_id`, `webhook_events.event_id`, plus the event tables' foreign keys |
 
-The schema is managed **only by Alembic** (`alembic/versions/`). `create_all()` is never used.
+The schema is managed **only through Alembic** (`alembic/versions/`). `create_all()` never runs.
 
 ## ⚡ Redis Usage
 
 | Use | Key / mechanism | Notes |
 |---|---|---|
-| 🚦 Signup limiter | `signup_attempts:*` | Sliding window, atomic Lua script |
-| 🚦 Login limiter | `login_attempts:*` | Sliding window, atomic Lua script |
-| 🔁 Webhook dedup | `webhook_processed:<event_id>` | 24h TTL, written after DB commit |
-| 🎟️ Token state | Refresh-token `jti`, single-use reset marker | Enables rotation and theft detection |
-| 📬 Broker | Celery task queue | Payment tasks and beat schedule |
+| 🚦 Signup limiter | `signup_attempts:*` | Sliding window, one atomic Lua script |
+| 🚦 Login limiter | `login_attempts:*` | Sliding window, one atomic Lua script |
+| 🔁 Webhook dedup | `webhook_processed:<event_id>` | 24h TTL, only written after the DB commit lands |
+| 🎟️ Token state | Refresh-token `jti`, single-use reset marker | What makes rotation and theft detection possible |
+| 📬 Broker | Celery task queue | Payment tasks and the beat schedule |
 
 ## 🛡️ Security
 
-| Area | Implementation |
+| Area | What's actually done |
 |---|---|
-| 🔑 Passwords | bcrypt. 8-72 chars with upper, lower, digit, special; the 72 cap matches bcrypt's limit, so long inputs get a clean `422` |
-| 🎟️ Tokens | Access JWT (15 min) and refresh JWT (7 days), typed (`access` vs `refresh`); each refresh token carries a `jti` tracked in Redis |
-| 🕵️ Theft detection | Every refresh revokes the old token. Presenting an already-rotated token means it was copied, so **all sessions for that user are revoked** |
-| 🚦 Rate limiting | Sliding-window log on a Redis sorted set, one atomic Lua script (no check-then-record race, no window-edge bursts) |
-| 🙈 No enumeration | One generic login error; `forgot-password` always `202`; signup failure says "Could not create account" |
-| 🔗 Reset / verify | Signed expiring tokens; reset is single-use via a Redis marker; verification lasts 24h and login is blocked until verified |
+| 🔑 Passwords | bcrypt. 8-72 chars, needs upper, lower, digit and a special char. The 72 cap matches bcrypt's own limit, so long input just gets a clean `422` instead of quietly getting truncated |
+| 🎟️ Tokens | Access JWT lasts 15 min, refresh lasts 7 days, both typed so one can't be used as the other. Each refresh token has a `jti` tracked in Redis |
+| 🕵️ Theft detection | Every refresh kills the old token. If that exact old token ever shows up again, it means someone copied it — so **every session for that user gets revoked** |
+| 🚦 Rate limiting | Sliding window on a Redis sorted set, done as one atomic Lua script so there's no gap between checking and recording, and no way to burst through at the edge of a window |
+| 🙈 No account enumeration | Login gives one generic error either way; `forgot-password` always returns `202`; signup just says "Could not create account" |
+| 🔗 Reset / verify | Signed tokens that expire; a reset token can only be used once; verification lasts 24h and login's blocked until you've done it |
 | 🪝 Webhook auth | Shared secret in `x-webhook-secret` |
-| 👮 Authorization | Ownership checked on every booking and payment read or write (`403`) |
-| 🧯 Error hygiene | Custom exceptions map to clean JSON; unexpected errors return a generic body and log the traceback with the request ID |
-| 🤐 Secrets | Environment variables only; `.env` is git-ignored |
+| 👮 Authorization | Every booking and payment read/write checks you actually own it — `403` if not |
+| 🧯 Error handling | Custom exceptions turn into clean JSON; anything unexpected returns a generic body while the real traceback gets logged with the request ID |
+| 🤐 Secrets | All from environment variables, `.env` is git-ignored |
 
 ## 🧪 Testing
 
@@ -520,22 +524,22 @@ docker compose exec postgres psql -U eve -d eve_db -c "CREATE DATABASE eve_test_
 docker compose exec api python -m pytest tests/ -q -p no:warnings
 ```
 
-**57 tests**
+**60 tests**
 
 | Suite | Location | Covers |
 |---|---|---|
-| 🧠 Unit | `tests/unit` | Booking capacity and duplicates, seat release, payment rules, webhook idempotency, auto-refund |
+| 🧠 Unit | `tests/unit` | Booking capacity and duplicates, seat release, payment rules, webhook idempotency, auto-refund, Celery retry behavior |
 | 🌐 Integration | `tests/integration` | Auth flows, catalog CRUD, ownership rules, webhook auth, replay, conflicting events, late-success refund |
 
-| Technique | Detail |
+| Technique | Why |
 |---|---|
-| 🔄 Per-test rollback | Separate `eve_test_db`; each test runs in a transaction that is rolled back |
-| 🎭 `fake_task` fixture | Autouse; patches out Celery dispatch so tests never enqueue real jobs |
-| 🎲 Deterministic payments | The 85/15 outcome is forced in tests |
-| 🏭 Factories | `make_auth_headers`, `make_slot` build realistic data quickly |
-| 🧹 Redis hygiene | Rate-limit keys cleared at session start |
+| 🔄 Per-test rollback | Separate `eve_test_db`, each test runs inside a transaction that gets rolled back after |
+| 🎭 `fake_task` fixture | Autouse — swaps out the real Celery task so tests never actually push anything to a broker |
+| 🎲 Deterministic payments | The 85/15 random outcome gets forced in tests, no flakiness |
+| 🏭 Factories | `make_auth_headers`, `make_slot` — build realistic data fast without repeating setup everywhere |
+| 🧹 Redis hygiene | Rate-limit keys get wiped at the start of the session |
 
-> ⚠️ Run tests against a local dev stack, not a shared one.
+> ⚠️ Run these against your own local stack, not a shared one — they touch real Redis keys and a real (test) database.
 
 ## 🗂️ Project Structure
 
@@ -565,52 +569,56 @@ docker compose exec api python -m pytest tests/ -q -p no:warnings
 
 ## 🧭 Assumptions
 
+Things I decided on my own, since the spec didn't spell them out:
+
 | # | Assumption |
 |---|---|
-| 1 | 💳 **The payment provider is simulated.** A worker picks `SUCCESS` (85%) or `FAILED` (15%) and settles through the same service method as the HTTP webhook. No real money moves |
-| 2 | 📧 **Email is mocked.** Links go to the API log; swapping in SMTP or SES only touches `services/email.py` |
-| 3 | 👥 **No admin role.** The spec defines none, so any signed-in user can create centres, tests and slots. Catalog reads are public |
-| 4 | 📅 **A slot is the appointment.** Date and time is the slot's `start_time`; a booking holds one seat until it fails or is cancelled |
-| 5 | 🚫 **One active booking per user per slot** (`PENDING` and `CONFIRMED` count) |
-| 6 | 🧾 **Amounts are snapshotted** from the centre price at booking time |
-| 7 | ↩️ **Refunds are recorded, not executed:** a `REFUNDED` row linked to the original payment |
-| 8 | 🔚 **`FAILED` and `CANCELLED` are terminal.** Retrying means a new booking |
-| 9 | 🌍 **All timestamps are UTC** |
-| 10 | 🔐 **Missing `Authorization` → `403`; invalid or expired token → `401`** (FastAPI `HTTPBearer` default) |
-| 11 | 🔵 **Google sign-in users are treated as email-verified** and have no password |
+| 1 | 💳 **The payment provider is fake.** A worker just rolls the dice — 85% `SUCCESS`, 15% `FAILED` — and feeds the result through the same code path a real webhook would use. No actual money involved anywhere |
+| 2 | 📧 **Email is mocked.** Links get dumped into the API log instead of sent. Swapping in real SMTP/SES only touches `services/email.py` |
+| 3 | 👥 **No admin role.** Nothing in the spec asked for one, so right now any signed-in user can add centres, tests, and slots. Catalog reads are public regardless |
+| 4 | 📅 **A slot is the appointment itself.** Its `start_time` is the appointment time, and a booking holds that seat until it fails or gets cancelled |
+| 5 | 🚫 **One active booking per user per slot** — `PENDING` and `CONFIRMED` both count as active |
+| 6 | 🧾 **The price gets locked in at booking time**, taken straight from the centre's price at that moment |
+| 7 | ↩️ **Refunds are recorded, not actually processed** — since there's no real payment gateway, a `REFUNDED` row is written and linked back to the original |
+| 8 | 🔚 **`FAILED` and `CANCELLED` are dead ends.** Want to try again? That's a new booking |
+| 9 | 🌍 **Everything's stored in UTC** |
+| 10 | 🔐 **No `Authorization` header → `403`. Bad or expired token → `401`.** That's just FastAPI's `HTTPBearer` default, didn't override it |
+| 11 | 🔵 **Google sign-in users are treated as already verified** and don't have a password on file |
 
 ## 🔮 What I'd Improve Next
 
-| Priority | Area | Improvement |
+If I had more time, in rough order of what actually matters:
+
+| Priority | Area | What |
 |---|---|---|
-| 🔴 | Correctness | **Concurrent identical webhooks:** state stays safe (unique constraint), but the losing request can surface as `500`. Catch `IntegrityError` on the event insert and return `duplicate_ignored` |
-| 🔴 | Security | **HMAC-signed webhooks** with timestamp tolerance and constant-time comparison, replacing the shared secret |
-| 🔴 | Correctness | **DB `CHECK` constraints**, e.g. `0 <= booked_count <= capacity`, as a second line of defence behind app locks |
-| 🟠 | Testing | **Parallel-load tests** for the locking guarantees, plus a test for the abandoned-booking cleanup (back-date `created_at`) |
-| 🟠 | Security | **Logout and access-token revocation** (only refresh tokens are revocable today) |
-| 🟠 | Security | **Cap `limit`** on paginated endpoints (e.g. `le=100`) and add **admin/staff roles** |
-| 🟡 | Performance | **Cache catalog reads in Redis** with invalidation on writes |
-| 🟡 | Reliability | **Real email delivery** via a Celery task with retries; **transactional outbox** so a payment task can't be lost between commit and publish |
-| 🟡 | Ops | **Production compose:** no `--reload` or source mounts, non-root containers, Gunicorn + Uvicorn workers, healthchecks, migrations in the entrypoint, secrets manager |
-| 🟡 | Ops | **Metrics and tracing** (Prometheus, OpenTelemetry) alongside request-ID logs; **CI pipeline** |
-| 🟡 | Product | Cursor pagination with totals, waitlist for full slots, rescheduling, per-centre timezones |
+| 🔴 | Correctness | **Two identical webhooks hitting at the exact same time** — the data stays correct (the unique constraint catches it), but the loser of that race can surface as a `500` instead of a clean `duplicate_ignored`. Fix is just catching the `IntegrityError` on insert |
+| 🔴 | Security | **Real HMAC-signed webhooks** with a timestamp check, instead of the shared secret it uses now |
+| 🔴 | Correctness | **DB-level `CHECK` constraints** like `0 <= booked_count <= capacity`, as a backup behind the app-level locks |
+| 🟠 | Testing | **Actual parallel-load tests** to prove the locking works under real concurrency, plus a test for the abandoned-booking cleanup job |
+| 🟠 | Security | **A real logout / access-token revocation** — right now only refresh tokens can be revoked |
+| 🟠 | Security | **Cap the `limit` param** on list endpoints so nobody can request 10 million rows, and add real admin/staff roles |
+| 🟡 | Performance | **Cache catalog reads in Redis**, invalidate on writes |
+| 🟡 | Reliability | **Real email sending** through a retryable Celery task, and a transactional outbox so a payment task can't vanish between commit and publish |
+| 🟡 | Ops | **A real production compose setup** — no `--reload`, no source mounts, non-root containers, Gunicorn + Uvicorn, healthchecks, migrations baked into the entrypoint, a proper secrets manager |
+| 🟡 | Ops | **Metrics and tracing** (Prometheus, OpenTelemetry) alongside the request-ID logs, plus a CI pipeline |
+| 🟡 | Product | Cursor-based pagination, a waitlist for full slots, rescheduling, per-centre timezones |
 
 ## 🩹 Troubleshooting
 
-| Symptom | Fix |
+| Problem | Fix |
 |---|---|
 | `relation "users" does not exist` | `docker compose exec api alembic upgrade head` |
-| `.env` change ignored | `docker compose up -d --force-recreate` (`restart` doesn't re-read env files) |
-| Celery code change not picked up | `docker compose restart celery-worker celery-beat` (no hot reload) |
-| `429 Too many attempts` | Wait, or `docker compose exec redis redis-cli DEL "login_attempts:<email>:<ip>"` |
-| `401` after a while | Access tokens last 15 min. Log in again or call `/auth/refresh` |
-| Webhook returns `already_resolved` | The worker settled it first. Stop the worker to test by hand |
+| Changed `.env` but nothing happened | `docker compose up -d --force-recreate` — `restart` doesn't re-read the file |
+| Changed a Celery task but old code still runs | `docker compose restart celery-worker celery-beat` — no hot reload there |
+| `429 Too many attempts` | Wait it out, or `docker compose exec redis redis-cli DEL "login_attempts:<email>:<ip>"` |
+| `401` after everything was working fine | Access tokens expire in 15 min — log in again or call `/auth/refresh` |
+| Webhook keeps returning `already_resolved` | The worker beat you to it. Stop it first if you want to test manually |
 
 ---
 
 <div align="center">
 
-### Built with  by **Rishabh Pandey** for the EVE Healthcare SDE Intern assignment
+### Built by **Rishabh Pandey** for the EVE Healthcare SDE Intern assignment
 
 `FastAPI` · `PostgreSQL` · `Redis` · `Celery` · `Docker`
 

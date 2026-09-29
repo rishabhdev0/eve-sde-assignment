@@ -54,9 +54,8 @@ ALLOWED_TRANSITIONS = {
     BookingStatus.CANCELLED: set(),
 }
 
-# Statuses that mean "this booking no longer needs its seat" - the seat is released
-# exactly once, whichever of these it lands on first. CONFIRMED deliberately excluded:
-# a confirmed booking is still holding a real appointment slot.
+# Booking is done needing its seat once it hits FAILED or CANCELLED - not CONFIRMED,
+# that one's still holding a real appointment.
 SEAT_RELEASING_STATUSES = {BookingStatus.FAILED, BookingStatus.CANCELLED}
 
 
@@ -82,11 +81,8 @@ class BookingService:
         booking.status = new_status
         self._log_event(booking.id, old, new_status.value, triggered_by)
 
-        # Release the slot seat whenever a booking lands on FAILED or CANCELLED -
-        # regardless of which state it came from or who/what triggered the transition
-        # (user cancelling, webhook confirming a failed payment, or reconciliation
-        # auto-failing a stuck one). The seat was reserved the moment the booking was
-        # created, so it must be released the moment the booking stops needing it.
+        # Free the seat whenever a booking ends up FAILED or CANCELLED, no matter
+        # what triggered it - user cancelling, a failed payment, or reconciliation.
         if new_status in SEAT_RELEASING_STATUSES:
             slot = self.slots.get_for_update(str(booking.slot_id))
             if slot and slot.booked_count > 0:
@@ -94,14 +90,9 @@ class BookingService:
 
     def create_booking(self, user_id: str, slot_id: str) -> Booking:
         with transaction(self.db):
-            # Lock the slot FIRST - this is what actually closes the race. Two
-            # concurrent create_booking calls for the same slot now serialize on
-            # this lock: whichever gets it first runs its entire duplicate-check +
-            # capacity-check + insert as one atomic unit before the second caller's
-            # lock request is granted. The second caller then sees the FIRST
-            # caller's already-committed booking when it runs its own duplicate
-            # check below, instead of both reading "no active booking yet" from
-            # a stale, pre-lock snapshot.
+            # Locking the slot first is what actually stops the race - two people
+            # booking the same slot at once now get serialized here, so the second
+            # one always sees the first one's booking before it checks anything.
             slot = self.slots.get_for_update(slot_id)
             if not slot:
                 raise SlotNotFoundError()
@@ -154,12 +145,10 @@ class BookingService:
 
             self.transition(booking, BookingStatus.CANCELLED, "user")
 
-            # A CONFIRMED booking means an underlying payment already succeeded -
-            # cancelling it must not leave that charge sitting there unreversed.
-            # We never mutate the original SUCCESS row (that would erase the true
-            # history of what happened); instead we record a new REFUNDED row that
-            # points back to it, so "charged $500, then refunded $500" is explicit
-            # and auditable rather than the original payment silently going stale.
+            # If it was CONFIRMED, the payment already went through - cancelling
+            # shouldn't leave that charge unreversed. We don't touch the original
+            # SUCCESS row, we add a new REFUNDED one pointing back to it, so the
+            # history stays honest: charged, then refunded.
             if was_confirmed:
                 payments = PaymentRepository(self.db)
                 successful_payments = [

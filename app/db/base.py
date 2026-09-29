@@ -2,6 +2,6 @@ from sqlalchemy.orm import declarative_base
 
 Base = declarative_base()
 
-# Import after Base is defined so every model registers its table on this metadata,
-# regardless of which entrypoint (api, celery worker, celery beat, alembic) loads this module first.
+# Import happens down here, after Base exists, so no matter which entrypoint
+# loads this first (api, worker, beat, alembic), every model gets registered on it.
 from app.models import *  # noqa

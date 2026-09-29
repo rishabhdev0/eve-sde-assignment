@@ -9,7 +9,11 @@ from app.models.slot import Slot
 from app.models.booking import Booking, BookingStatus
 from app.models.payment import Payment, PaymentStatus
 from app.schemas.webhook import WebhookEventPayload, WebhookPaymentStatus
-from app.services.webhook_service import WebhookService, WebhookBookingNotFoundError
+from app.services.webhook_service import (
+    WebhookService,
+    WebhookBookingNotFoundError,
+    WebhookPaymentNotFoundError,
+)
 
 
 def _make_user(db_session):
@@ -52,12 +56,9 @@ def _make_booking_and_payment(db_session):
     db_session.commit()
     return booking, payment
 
-
 def _unique_event_id() -> str:
-    # Redis has no per-test rollback like Postgres does, so a hardcoded event_id from a
-    # previous test run would still be marked "seen" - always generate a fresh one.
+    # Redis doesn't reset between test runs, so a fixed event_id would still look "seen" - always make a new one.
     return f"test-event-{uuid.uuid4()}"
-
 
 def test_webhook_processes_new_event_and_confirms_booking(db_session):
     booking, payment = _make_booking_and_payment(db_session)
@@ -126,6 +127,18 @@ def test_webhook_for_missing_booking_raises_404(db_session):
     )
     with pytest.raises(WebhookBookingNotFoundError):
         WebhookService(db_session).handle_event(payload)
+
+
+def test_webhook_for_missing_payment_raises_404(db_session):
+    booking, _ = _make_booking_and_payment(db_session)
+
+    payload = WebhookEventPayload(
+        event_id=_unique_event_id(), booking_id=str(booking.id), payment_id=str(uuid.uuid4()),
+        status=WebhookPaymentStatus.SUCCESS, provider_ref="TEST-REF-8",
+    )
+    with pytest.raises(WebhookPaymentNotFoundError):
+        WebhookService(db_session).handle_event(payload)
+
 
 def test_success_webhook_after_booking_cancelled_triggers_auto_refund(db_session):
     """The stuck-payment scenario: user cancels while payment is still in flight."""

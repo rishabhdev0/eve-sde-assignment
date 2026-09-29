@@ -26,10 +26,8 @@ TestingSessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engin
 @pytest.fixture(scope="session", autouse=True)
 def setup_test_db():
     Base.metadata.create_all(bind=engine)
-    # Clear any rate-limit state left over from previous test runs. Redis has no
-    # per-test rollback the way the Postgres session does, so without this,
-    # repeated runs accumulate real request counts against the same TestClient
-    # IP and eventually trip rate limits unrelated to the test itself.
+    # Redis doesn't roll back like Postgres does, so old rate-limit counts pile up
+    # across test runs and eventually block tests that have nothing to do with it.
     for key in redis_client.scan_iter("signup_attempts:*"):
         redis_client.delete(key)
     for key in redis_client.scan_iter("login_attempts:*"):

@@ -38,8 +38,8 @@ class PaymentService:
         self.bookings = BookingRepository(db)
 
     def create_payment(self, user_id: str, booking_id: str) -> Payment:
-        # Ownership/existence check first, outside the lock - no point locking a row
-        # the caller isn't even allowed to touch.
+        # Check ownership before locking anything - no point locking a row
+        # this user can't even touch.
         booking = self.bookings.get_by_id(booking_id)
         if not booking:
             raise BookingNotFoundForPaymentError()
@@ -48,10 +48,8 @@ class PaymentService:
 
         payment = None
         with transaction(self.db):
-            # Row-lock the booking now, then re-check its status under the lock.
-            # This closes the race where a cancel and a pay request land at nearly
-            # the same instant - whichever transaction commits first wins, and the
-            # second one sees the *post-commit* state, not a stale read.
+            # Lock the booking, then check its status again under the lock -
+            # closes the race between a cancel and a pay landing at the same time.
             locked_booking = self.bookings.get_for_update(booking_id)
             if not locked_booking or locked_booking.status != BookingStatus.PENDING:
                 raise BookingNotPayableError()
@@ -66,8 +64,8 @@ class PaymentService:
 
         self.db.refresh(payment)
 
-        # Dispatch happens after the transaction commits - never queue a task whose
-        # DB row might get rolled back if something above raised.
+        # Only queue the task after the transaction commits - don't want to queue
+        # a job for a row that might've gotten rolled back.
         from app.tasks.payment_tasks import process_payment_async
         process_payment_async.delay(str(payment.id))
 

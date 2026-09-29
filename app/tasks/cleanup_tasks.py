@@ -17,15 +17,9 @@ ABANDONED_THRESHOLD_MINUTES = 15
 def expire_abandoned_bookings_in_session(
     db: Session, threshold_minutes: int = ABANDONED_THRESHOLD_MINUTES
 ) -> dict:
-    """
-    Cancels PENDING bookings that were never paid for, releasing their seats.
-
-    Skips any booking with a live payment (PENDING or SUCCESS): an in-flight payment
-    belongs to the webhook/reconciliation flow, and cancelling underneath it would
-    recreate the late-webhook problem. Each booking is re-checked under its row lock,
-    so a payment created at the same instant either wins the lock (we skip) or loses
-    it (payment creation then sees CANCELLED and is rejected).
-    """
+    # Cancels PENDING bookings nobody ever paid for and frees the seat.
+    # Skips anything with a live payment (PENDING or SUCCESS) - don't want to
+    # cancel underneath a payment that's mid-flight, same problem as a late webhook.
     cutoff = datetime.now(timezone.utc) - timedelta(minutes=threshold_minutes)
     candidate_ids = [
         str(row.id)

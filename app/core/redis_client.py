@@ -4,10 +4,9 @@ from app.core.config import settings
 
 redis_client = Redis.from_url(settings.REDIS_URL, decode_responses=True)
 
-# Atomic sliding-window rate limiter using a Redis sorted set as a timestamped log.
-# Each attempt is added as a member scored by its own timestamp; on every check we
-# trim anything older than the window before counting, so the window truly "slides"
-# instead of resetting on a fixed boundary that can be gamed with a burst.
+# Sliding-window rate limiter using a Redis sorted set as a log of timestamps.
+# Old entries get trimmed on every check, so the window actually slides instead
+# of resetting on a fixed clock boundary that's easy to burst through.
 _SLIDING_WINDOW_SCRIPT = """
 local key = KEYS[1]
 local now = tonumber(ARGV[1])
@@ -30,8 +29,7 @@ _sliding_window = redis_client.register_script(_SLIDING_WINDOW_SCRIPT)
 
 
 def check_login_rate_limit(identifier: str) -> bool:
-    """Returns True if this attempt is allowed, False if rate-limited.
-    Sliding window: counts only attempts within the trailing N seconds, not a fixed bucket."""
+    # True if this attempt is allowed, False if they've hit the limit.
     key = f"login_attempts:{identifier}"
     now = time.time()
     member = f"{now}:{id(object())}"
@@ -47,8 +45,7 @@ def reset_login_rate_limit(identifier: str) -> None:
 
 
 def check_signup_rate_limit(identifier: str) -> bool:
-    """Same sliding-window mechanism as login, applied to signup - prevents both
-    account-enumeration probing and spam account creation from a single IP."""
+    # Same idea as login, just for signup - stops spam accounts and probing.
     key = f"signup_attempts:{identifier}"
     now = time.time()
     member = f"{now}:{id(object())}"
@@ -89,8 +86,8 @@ def revoke_all_refresh_tokens(user_id: str) -> None:
 
 
 def mark_refresh_jti_used(user_id: str, jti: str, ttl_seconds: int) -> None:
-    """Records that this jti was legitimately rotated out - kept around so a later
-    attempt to reuse it can be told apart from a token that's simply invalid/expired."""
+    # Keeps track of tokens that were rotated out properly, so if one shows up
+    # again later we know it was reused, not just expired or invalid.
     redis_client.setex(f"used_refresh_jti:{user_id}:{jti}", ttl_seconds, "1")
 
 
