@@ -111,7 +111,8 @@ flowchart LR
 **Prerequisite:** Docker (Desktop, or Engine with Compose v2). Nothing else.
 
 ```bash
-git clone <your-repo-url> && cd CareFlow
+git clone https://github.com/rishabhdev0/eve-sde-assignment.git CareFlow
+cd CareFlow
 
 cp .env.example .env            # PowerShell: copy .env.example .env
 # Set JWT_SECRET, SESSION_SECRET and WEBHOOK_SHARED_SECRET to three different long random strings
